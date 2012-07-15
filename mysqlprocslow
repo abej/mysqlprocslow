@@ -1,0 +1,207 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Long;
+use DBI;
+use FileHandle;
+
+=head1 NAME
+
+mysqlprocslow - save and monitor slow-query information
+with the output of SHOW PROCESSLIST.
+
+=head1 SYNOPSIS
+ 
+  mysqlprocslow [OPTIONS] 
+
+  Examples:
+
+  mysqlprocslow -u dbuser -h dbhost -p
+
+  mysqlprocslow -u dbuser -h dbhost -p -o slowquery.log
+
+=cut
+
+# Documentation continued at end of file
+
+# ignore procs
+my @ignore_procs = (
+    '',
+    'show full processlist', 
+    'Binlog Dump',
+    'Waiting for master to send event',
+    );
+
+sub usage {
+    die @_,"\nExecute 'perldoc $0' for documentation\n";
+}
+
+my %opt = (
+    'user'	=> scalar getpwuid($>),
+    'host'      => "localhost",
+);
+Getopt::Long::Configure(qw(no_ignore_case));
+GetOptions( \%opt,
+	    "help",
+	    "user|u=s",
+	    "password=s",
+	    "host|h=s",
+	    "port|P=s",
+	    "socket|S=s",
+	    "o=s",
+	    "quiet|q",
+	    "delay|d",
+	    "long-query-time|long|l=i",
+	    "p",
+) or usage("Invalid option");
+
+if ($opt{'help'}) {usage();}
+
+my $passwd = $opt{'password'} if ($opt{'password'});
+if (defined $opt{'p'}) {
+    print "Enter password: ";
+    system('stty','-echo');
+    chomp($passwd=<STDIN>);
+    system('stty','echo');
+    print "\n";
+}
+
+my $fh;
+if (defined $opt{'o'}) {
+    $fh = new FileHandle $opt{'o'}, "w";
+    die "Unable to open: " . $opt{'o'} . "\n" if (not defined $fh);
+    $fh->autoflush(1);
+}
+
+my $long_query_time = ($opt{'long-query-time'} ? $opt{'long-query-time'} : 0);
+
+# connect
+my $dsn = ";host=$opt{'host'}";
+$dsn .= ";port=$opt{'port'}" if $opt{'port'};
+$dsn .= ";mysql_socket=$opt{'socket'}" if $opt{'socket'};
+
+my $dbh = DBI->connect("dbi:mysql:$dsn;mysql_read_default_group=perl",
+		       $opt{'user'}, $passwd, {
+			   RaiseError => 1,
+			   PrintError => 0,
+			   AutoCommit => 1,
+		       });
+
+my $st_procs = $dbh->prepare("show full processlist");
+my $real_buf;
+my $delay_buf;
+my %lastproc = ();
+
+while(1) {
+
+    $st_procs->execute() or die "Unable to execuete SHOW PROCESSLIST: " . $dbh->errstr();
+    $real_buf = $delay_buf = "";
+    my %procrun = ();
+
+    while (my $proc = $st_procs->fetchrow_hashref()) {
+
+	while(my ($key, $value) = each(%$proc)) {
+	    $proc->{$key} = "" unless ($value);
+	}
+	$proc->{Time} = 0 unless($proc->{Time});
+
+	next if (grep($_ eq $proc->{Info}, @ignore_procs));
+
+#	$proc->{Time} = 0.1 if ($proc->{Time} == 0);
+
+	$real_buf .= sprint_query($proc) . "\n" if ($proc->{Time} >= $long_query_time);
+	$lastproc{$proc->{Id}} = $proc;
+	$procrun{$proc->{Id}} = 1;
+    }
+
+    foreach my $lp_id (keys %lastproc) {
+	unless (exists($procrun{$lp_id})) {
+	    if ($lastproc{$lp_id}->{Time} >= $long_query_time) {
+		$delay_buf .= sprint_query($lastproc{$lp_id});
+	    }
+	    delete $lastproc{$lp_id};
+	}
+    }
+
+    unless ($opt{'quiet'}) {
+	if ($opt{'delay'}) {
+	    print $delay_buf;
+	} else {
+	    print $real_buf;
+	}
+    }
+    $fh->print($delay_buf) if ($opt{'o'});
+    sleep(1);
+}
+
+sub sprint_query {
+    my $proc = shift;
+    my $buf;
+
+    $buf = sprintf("# User\@Host: %s[%s] @ %s Db: %s Command: %s\n",
+		   $proc->{User}, $proc->{User}, $proc->{Host},
+		   $proc->{db}, $proc->{Command});
+    $buf .= sprintf("# Query_time: %d  Lock_time: 0  Rows_sent: 0  Rows_examined: 0  State: %s\n",
+		    $proc->{Time}, $proc->{State});
+    $buf .= $proc->{Info} . ";\n";
+
+    return $buf;
+}
+
+=head1 DESCRIPTION
+
+save and monitor slow-query information with the output of SHOW PROCESSLIST.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --help
+
+Display helpscreen and exit
+
+=item -u, --user=#         
+
+user for database login if not current user. Give a user
+who has sufficient privileges PROCESS.
+
+=item -p, --password=#
+
+password to use when connecting to server. If password is
+not given it's asked from the tty
+
+=item -h, --host=#     
+
+host to connect to
+
+=item -P, --port=#         
+
+port to use when connecting to server
+
+=item -S, --socket=#         
+
+UNIX domain socket to use when connecting to server
+
+=item -o=#
+
+write the slow queries to the file filename
+
+=item -q, --quiet
+
+no print slow queris on STDOUT
+
+=item -d, --delay
+
+output query once finished on STDOUT
+
+=item -l=#, --long=#, --long-query-time=#
+
+output or save queries that took more than long-query-time seconds on PROCESSLIST;
+
+=head1 WARRANTY
+
+This software is free and comes without warranty of any kind.
+
+=head1 AUTHOR
+
+2010-09-27 xxx xxx (xxx@xxxx.xx)
