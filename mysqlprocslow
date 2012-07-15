@@ -198,6 +198,8 @@ output query once finished on STDOUT
 
 output or save queries that took more than long-query-time seconds on PROCESSLIST;
 
+=back
+
 =head1 WARRANTY
 
 This software is free and comes without warranty of any kind.
